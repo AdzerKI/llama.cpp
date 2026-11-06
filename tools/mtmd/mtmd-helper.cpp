@@ -748,13 +748,25 @@ struct mtmd_helper_video : mtmd_helper_video_seq {
             if (!created) {
                 return;
             }
-            subprocess_terminate(&proc);
 #ifdef _WIN32
+            // a killed ffmpeg leaves the temp file of cache: behind on windows, so let it exit once its next write to stdout fails
+            if (proc.stdout_file) {
+                fclose(proc.stdout_file);
+                fclose(proc.stderr_file);
+                proc.stdout_file = nullptr;
+                proc.stderr_file = nullptr;
+            }
             // no SIGPIPE on windows: a blocked feeder only gets a broken pipe once we close our read end of the child stdin
             if (proc.hStdInput) {
                 CloseHandle(proc.hStdInput);
                 proc.hStdInput = nullptr;
             }
+            const DWORD exit_timeout_ms = 5000;
+            if (WaitForSingleObject(proc.hProcess, exit_timeout_ms) != WAIT_OBJECT_0) {
+                subprocess_terminate(&proc);
+            }
+#else
+            subprocess_terminate(&proc);
 #endif
             // join before destroy: feeder holds a FILE* from subprocess_stdin;
             // subprocess_destroy closes it, so the thread must finish first
