@@ -6,6 +6,7 @@
 
 #include <cpp-httplib/httplib.h>
 
+#include <atomic>
 #include <functional>
 #include <future>
 #include <memory>
@@ -24,6 +25,7 @@ public:
     std::vector<std::thread> threads; // one thread per listener
     std::unique_ptr<httplib::ThreadPool> pool; // single pool shared among all listeners
     int n_threads_http = 0;
+    std::atomic<bool> stopping = false;
 };
 
 class server_http_task_queue : public httplib::TaskQueue {
@@ -547,6 +549,7 @@ bool server_http_context::start() {
 }
 
 void server_http_context::stop() const {
+    pimpl->stopping = true;
     for (const auto & srv : pimpl->servers) {
         if (srv) {
             srv->stop();
@@ -675,7 +678,7 @@ static void process_handler_response(server_http_req_ptr && request, server_http
 
 void server_http_context::get(const std::string & path, const server_http_context::handler_t & handler) const {
     handlers.emplace(path, handler);
-    auto callback = [handler](const httplib::Request & req, httplib::Response & res) {
+    auto callback = [handler, impl = pimpl.get()](const httplib::Request & req, httplib::Response & res) {
         server_http_req_ptr request = std::make_unique<server_http_req>(server_http_req{
             get_params(req),
             get_headers(req),
@@ -683,7 +686,7 @@ void server_http_context::get(const std::string & path, const server_http_contex
             build_query_string(req),
             req.body,
             {},
-            req.is_connection_closed
+            [&req, impl]() { return impl->stopping || req.is_connection_closed(); }
         });
         server_http_res_ptr response = handler(*request);
         process_handler_response(std::move(request), response, res);
@@ -696,7 +699,7 @@ void server_http_context::get(const std::string & path, const server_http_contex
 
 void server_http_context::post(const std::string & path, const server_http_context::handler_t & handler) const {
     handlers.emplace(path, handler);
-    auto callback = [handler](const httplib::Request & req, httplib::Response & res) {
+    auto callback = [handler, impl = pimpl.get()](const httplib::Request & req, httplib::Response & res) {
         std::string body = req.body;
         std::map<std::string, uploaded_file> files;
 
@@ -734,7 +737,7 @@ void server_http_context::post(const std::string & path, const server_http_conte
             build_query_string(req),
             body,
             std::move(files),
-            req.is_connection_closed
+            [&req, impl]() { return impl->stopping || req.is_connection_closed(); }
         });
         server_http_res_ptr response = handler(*request);
         process_handler_response(std::move(request), response, res);
@@ -748,7 +751,7 @@ void server_http_context::post(const std::string & path, const server_http_conte
 void server_http_context::ws(const std::string & path, const server_http_context::ws_handler_t & handler) const {
     const std::string full_path = path_prefix + path;
 
-    auto callback = [handler](const httplib::Request & req, httplib::ws::WebSocket & sock) {
+    auto callback = [handler, impl = pimpl.get()](const httplib::Request & req, httplib::ws::WebSocket & sock) {
         struct conn_impl : server_http_context::ws_conn {
             httplib::ws::WebSocket & sock;
             std::mutex mutex_send;
@@ -776,8 +779,8 @@ void server_http_context::ws(const std::string & path, const server_http_context
             }
         };
         conn_impl conn(sock);
-        const std::function<bool()> should_stop = [&sock]() {
-            return !sock.is_open();
+        const std::function<bool()> should_stop = [&sock, impl]() {
+            return impl->stopping || !sock.is_open();
         };
         server_http_req request{
             get_params(req),
@@ -797,7 +800,7 @@ void server_http_context::ws(const std::string & path, const server_http_context
 
 void server_http_context::del(const std::string & path, const server_http_context::handler_t & handler) const {
     handlers.emplace(path, handler);
-    auto callback = [handler](const httplib::Request & req, httplib::Response & res) {
+    auto callback = [handler, impl = pimpl.get()](const httplib::Request & req, httplib::Response & res) {
         server_http_req_ptr request = std::make_unique<server_http_req>(server_http_req{
             get_params(req),
             get_headers(req),
@@ -805,7 +808,7 @@ void server_http_context::del(const std::string & path, const server_http_contex
             build_query_string(req),
             req.body,
             {},
-            req.is_connection_closed
+            [&req, impl]() { return impl->stopping || req.is_connection_closed(); }
         });
         server_http_res_ptr response = handler(*request);
         process_handler_response(std::move(request), response, res);

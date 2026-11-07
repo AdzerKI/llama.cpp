@@ -1,6 +1,7 @@
 import pytest
 import requests
 import socket
+import threading
 from utils import *
 
 server = ServerPreset.tinyllama2()
@@ -143,3 +144,25 @@ def test_server_model_aliases_and_tags():
     assert set(model["tags"]) == {"chat", "fim", "small"}
     # id is derived from first alias (alphabetical order from std::set)
     assert model["id"] == "code"
+
+
+def test_server_stop_with_pending_request():
+    global server
+    server.server_slots = True
+    server.enable_ctx_shift = True
+    server.n_predict = -1
+    server.start()
+    process = server.process
+    assert process is not None
+
+    def generate():
+        try:
+            server.make_request("POST", "/completion", data={"prompt": "Once upon a time", "ignore_eos": True})
+        except requests.exceptions.RequestException:
+            pass
+
+    threading.Thread(target=generate, daemon=True).start()
+    while not any(slot["is_processing"] for slot in server.make_request("GET", "/slots").body):
+        time.sleep(0.1)
+    process.terminate()
+    process.wait(timeout=10)
